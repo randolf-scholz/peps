@@ -1,0 +1,173 @@
+PEP: 800
+Title: Matching Union Types
+Author: Randolf Scholz <randolf.scholz@gmail.com>
+Status: Draft
+Type: Standards Track
+Topic: Typing
+Created: 21-Jul-2025
+Python-Version: 3.15
+
+Abstract
+========
+
+This PEP proposes allowing union types to be used in structural pattern matching [2]_.
+
+Motivation
+==========
+
+:pep:`604` introduced the ``|`` operator to create type unions, and allows its
+usage in ``isinstance`` and ``issubclass`` calls.
+
+:pep:`634` introduced structural pattern matching, which allows representing ``isinstance``
+calls using the more powerful class-pattern syntax.
+
+This PEP proposes to allow using union types in class patterns, mirroring their behavior as
+observed in ``isinstance`` calls.
+
+As a motivating example, consider using the ``ast`` module to find all decorated functions
+in a Python source file. The corresponding ``ast`` node classes are ``FunctionDef`` and ``AsyncFunctionDef``.
+To match both types of function definitions, one must currently either write two separate
+case clauses or use a union-pattern of class-patterns::
+
+    import ast
+
+    for node in ast.walk(tree):
+        match node:
+            case (
+                ast.FunctionDef(name=name, decorator_list=decorators)
+                | ast.AsyncFunctionDef(name=name, decorator_list=decorators)
+            ):
+                print(f"Found function {name} with decorators {decorators}")
+
+With this PEP, the same logic can be expressed more elegantly as::
+
+    import ast
+
+    AnyFunctionDef = ast.FunctionDef | ast.AsyncFunctionDef
+
+    for node in ast.walk(tree):
+        match node:
+            case AnyFunctionDef(name=name, decorator_list=decorators):
+                print(f"Found function {name} with decorators {decorators}")
+
+This has four main advantages:
+
+1. It reduces the amount of boilerplate code needed to match multiple classes in a single ``case`` clause,
+   making the code more readable and maintainable.
+2. It allows for easier extension and refactoring. If a class is to be added or removed from the selection of classes to match,
+   instead of updating all existing ``case`` clauses across all files in the codebase, updating the union type definition is sufficient.
+3. It strengthens the consistency between the behavior of ``isinstance`` and class-pattern matching.
+4. It allows emulation of ``@sealed`` types proposed in [6]_.
+
+Specification
+=============
+
+This PEP modifies the logical flow of class-pattern matching [1]_.
+When ``name_or_attr`` is a union, the pattern is sequentially checked against each member of the union,
+returning either the first match or raising on the first encountered exception.
+
+This makes matching a class pattern with union type essentially equivalent to matching the
+union-pattern of the class-pattern of the individual members::
+
+    union = A | B | C
+    match arg:
+        case union(foo=foo, bar=bar): ...
+        # is essentially equivalent to:
+        case A(foo=foo, bar=bar) | B(foo=foo, bar=bar) | C(foo=foo, bar=bar): ...
+
+A small difference is that matching malformed union types such as ``int | list[int]`` may still succeed, whereas
+``case int() | list[int]():`` would be an illegal pattern causing a ``SyntaxError``.
+
+Originally, :pep:`604` specified that calls like ``isinstance(5, int | list[str])`` should always raise a ``TypeError``,
+since the second argument is not an instance of ``type`` (but of ``types.GenericAlias``).
+While this is the case in Python 3.10, this behavior was changed in Python 3.11,
+and a ``TypeError`` is only raised if no earlier legal member of the union produced a match.
+This PEP adopts the same behavior as ``isinstance`` for consistency. See [4]_ and [5]_ for more details.
+
+Examples
+========
+
+A simple example of matching a union type::
+
+    IntOrStr = int | str
+    match "Hello":
+        case IntOrStr(x):
+            # will match, since str is a valid member of the union
+            print(f"Matched string {x!r}")
+
+    match 3.14:
+        case IntOrStr(x):
+            # will not match, since float value is neither int nor str.
+            ...
+        case _:
+            # will match, since the wildcard pattern matches everything
+            print("Matched something else")
+
+Matching union types with positional or keyword arguments is straightforward::
+
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Point2D:
+        x: int
+        y: int
+
+    @dataclasses.dataclass
+    class Point3D:
+        x: int
+        y: int
+        z: int
+
+    AnyPoint = Point2D | Point3D
+    IntOrStr = int | str
+
+    match Point2D(1, 2):
+        case AnyPoint(x, y):
+            print(f"Matched Point({x}, {y})")  # Matched Point(1, 2)
+
+    match Point3D(1, 2, 3):
+        case AnyPoint(x, y, z):
+            # Will match the second member, since Point2D has no z component
+            print(f"Matched Point({x}, {y}, {z})")  # Matched Point(1, 2, 3)
+
+    match Point3D(1, 2, 3):
+        case AnyPoint(x, y, z=IntOrStr(value)):
+            # No restriction on the subpatterns.
+            print(f"Matched Point({x}, {y}, {value})")  # Matched Point(1, 2, 3)
+
+
+Invalid class patterns within a union only raise exceptions if evaluated::
+
+    Dims = int | tuple[int, ...]
+
+    match 1:
+        case Dims() as one:
+            # eagerly matches int, second union member is never tested
+            print("Matched single dimension {one!r}.")
+
+    match (1, 2):
+        case Dims() as many:
+            # will produce a ``TypeError``, since tuple[int, ...] is not a valid class pattern
+            print("Matched multiple dimensions {many!r}.")
+
+
+Reference Implementation
+========================
+
+- A proposed implementation for CPython is available in [3]_.
+
+References
+==========
+
+.. [1] Class Patterns
+   https://docs.python.org/3/reference/compound_stmts.html#class-patterns
+.. [2] [match-case] Allow matching Union types
+   https://github.com/python/cpython/issues/106246
+.. [3] gh-106246: Allow the use of unions as match patterns
+   https://github.com/python/cpython/pull/118644
+.. [4] Speed up isinstance on union types
+   https://github.com/python/cpython/issues/91603
+.. [5] ``isinstance(object, classinfo)``
+   https://docs.python.org/3/library/functions.html#isinstance
+.. [6] Draft PEP: Sealed decorator for static typing
+   https://discuss.python.org/t/draft-pep-sealed-decorator-for-static-typing/49206
